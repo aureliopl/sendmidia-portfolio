@@ -1,0 +1,25 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+
+# Dados persistentes (banco SQLite + sessões do WhatsApp/Baileys) — NUNCA commitar
+/data/*
+!/data/.gitkeep
+
+*.log
+logs/
+.DS_Store
+.vscode/
+.idea/
+
+*.pem
+*.key
+*.sqlite*
+*.db*
+.env.*
+!.env.example
+.claude/
+.agents/

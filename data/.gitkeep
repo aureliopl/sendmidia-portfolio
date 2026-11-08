@@ -1,0 +1,1 @@
+Mantém a pasta data/ no repositório. O conteúdo real (banco SQLite e sessões do WhatsApp) é ignorado pelo .gitignore e nunca vai para o GitHub.

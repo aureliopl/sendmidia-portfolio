@@ -1,0 +1,27 @@
+{
+  "name": "@sendmidia/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^10.0.0",
+    "@fastify/secure-session": "^8.3.0",
+    "@fastify/static": "^10.1.10",
+    "@prisma/client": "6.19.3",
+    "@whiskeysockets/baileys": "^6.7.23",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "fastify-plugin": "^5.1.0",
+    "nodemailer": "^10.4.0",
+    "pino": "^10.3.1",
+    "prisma": "6.19.3",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1"
+  }
+}

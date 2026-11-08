@@ -1,0 +1,473 @@
+// SendMídia — schema do banco (Prisma + SQLite).
+// Modelos conforme CLAUDE.md §7. SQLite (via Prisma) não suporta enums nativos,
+// então campos de "status" são String com os valores permitidos documentados ao lado.
+// A URL do banco é definida em runtime por server/src/db.js (caminho absoluto dentro
+// de DATA_DIR) e, para o CLI do Prisma, lida do .env da raiz (DATABASE_URL).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Números de WhatsApp conectados via QR Code. Executam as ações nos grupos.
+model Account {
+  id          String   @id @default(cuid())
+  nome        String
+  telefone    String?
+  // status: connected | disconnected | no_session
+  status      String   @default("no_session")
+  sessionPath String? // pasta das credenciais Baileys (data/sessions/<id>)
+  projeto     String?
+  ultimaSync  DateTime? // última sincronização de contatos/grupos via Baileys
+  envioPausadoAte DateTime? // pausa automática anti-banimento quando a conta oscila/falha
+  envioFalhasConsecutivas Int @default(0)
+  envioUltimaFalhaEm DateTime?
+  criadoEm    DateTime @default(now())
+
+  contacts            Contact[]
+  groups              Group[]
+  campaignAccounts    CampaignAccount[]
+  scheduledSends      ScheduledSend[]
+  participantRemovals ParticipantRemoval[]
+  groupEdits          GroupEdit[]
+  entryRequests       EntryRequest[]
+  groupActivities     GroupActivity[]
+  leadEvents          LeadEvent[]
+  // campanhas em que esta conta é a designada para criar grupos automaticamente.
+  criadoraEm          Campaign[]           @relation("CriadoraDeGrupos")
+  sessionOwnership    AccountSessionOwnership?
+
+  @@index([envioPausadoAte])
+}
+
+// Contatos sincronizados de uma conta.
+model Contact {
+  id         String  @id @default(cuid())
+  accountId  String
+  nome       String?
+  numero     String
+  verificado Boolean @default(false)
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, numero])
+}
+
+// "Containers" que agrupam Contas associadas + Grupos.
+model Campaign {
+  id       String   @id @default(cuid())
+  nome     String
+  tipo     String?
+  // status: active | archived
+  status   String   @default("active")
+  // velocidade de disparo padrão: rapida | normal | lenta | ultralenta | custom
+  velocidadePadrao String @default("normal")
+  // código do link de convite geral da campanha (deep linking): /i/<inviteCode>.
+  inviteCode       String? @unique
+  // capacidade (máx. de participantes) por grupo desta campanha. Ao atingir, o grupo vira "full".
+  // Recomendado 600; limitado a 1000 na UI (WhatsApp aceita até 1024).
+  capacidadeGrupo  Int     @default(600)
+  // conta associada designada para CRIAR grupos automaticamente (fallback do link geral).
+  // Exclusiva: só uma por campanha (campo único). null = nenhuma definida.
+  contaCriadoraId  String?
+  // horas que um grupo criado PELA PLATAFORMA fica com a interação aberta (todos enviam)
+  // antes de fechar sozinho (só admin envia) — anti-banimento. 0 = não abre (nasce fechado).
+  aberturaInteracaoHoras Int @default(24)
+  criadoEm DateTime @default(now())
+
+  campaignAccounts    CampaignAccount[]
+  groups              Group[]
+  messages            Message[]
+  scheduledSends      ScheduledSend[]
+  entryRequests       EntryRequest[]
+  tags                Tag[]
+  participantRemovals ParticipantRemoval[]
+  groupEdits          GroupEdit[]
+  groupActivities     GroupActivity[]
+  leadEvents          LeadEvent[]
+  clicks              CampaignClick[]
+  contaCriadora       Account? @relation("CriadoraDeGrupos", fields: [contaCriadoraId], references: [id], onDelete: SetNull)
+}
+
+// Clique no link de convite geral da campanha (deep linking). Alimenta os indicadores
+// Clicks e % de entrada (entraram/clicks) por período. `groupId` = grupo destino do redirect
+// (null quando não havia grupo aberto e o clique caiu na página "sem vaga").
+model CampaignClick {
+  id         String   @id @default(cuid())
+  campaignId String
+  groupId    String?
+  criadoEm   DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, criadoEm])
+}
+
+// Associação N:N entre Campanha e Conta.
+model CampaignAccount {
+  campaignId String
+  accountId  String
+  criadoEm   DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([campaignId, accountId])
+}
+
+// Grupos de WhatsApp, vinculados a uma campanha e administrados por uma conta.
+model Group {
+  id          String   @id @default(cuid())
+  campaignId  String
+  accountId   String // conta admin/dona do grupo
+  waGroupId   String? // id do grupo no WhatsApp
+  nome        String
+  foto        String?
+  linkConvite String?
+  participantes Int    @default(0)
+  capacidade  Int      @default(600)
+  // status: open | closed | full | suspended
+  status      String   @default("open")
+  // quando a interação deve fechar sozinha (só admin envia). Setado na criação pela
+  // plataforma (criadoEm + aberturaInteracaoHoras da campanha). null = nada agendado.
+  fecharInteracaoEm DateTime?
+  criadoEm    DateTime @default(now())
+
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  account             Account              @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  participants        GroupParticipant[]
+  entryRequests       EntryRequest[]
+  participantRemovals ParticipantRemoval[]
+  groupEdits          GroupEdit[]
+  groupActivities     GroupActivity[]
+  leadEvents          LeadEvent[]
+
+  @@index([campaignId])
+  @@index([accountId])
+}
+
+// Participantes de um grupo (para detectar duplicados entre grupos).
+model GroupParticipant {
+  id      String  @id @default(cuid())
+  groupId String
+  // chave de duplicação: dígitos do telefone (PN) ou o id do LID quando o WhatsApp não
+  // expõe o número (grupos em modo LID — padrão atual). Comparada entre grupos.
+  numero  String
+  // endereço completo p/ ações Baileys: "<num>@s.whatsapp.net" ou "<id>@lid".
+  jid     String?
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, numero])
+  @@index([numero])
+}
+
+// Mensagens. Uma mensagem é um CONJUNTO ORDENADO de blocos (texto e/ou mídia), guardado em
+// `blocos` (JSON). Os campos conteudo/midia/midiaTipo/midiaNome são mantidos como RESUMO
+// (1º bloco) para listagens/calendário e retrocompatibilidade com mensagens de bloco único.
+model Message {
+  id              String   @id @default(cuid())
+  campaignId      String
+  // resumo textual (1º bloco com texto) — para preview em listas/calendário.
+  conteudo        String
+  // blocos da mensagem: JSON [{ tipo:'texto'|'midia', conteudo, midia, midiaTipo, midiaNome, usarPreviewLink }].
+  // null/[] = mensagem legada de bloco único (derivada de conteudo/midia).
+  blocos          String?
+  // mídia anexada: URL externa (http) OU caminho de upload local (/api/uploads/<arquivo>).
+  midia           String?
+  // tipo da mídia: image | video | audio | gif | sticker | document. null = só texto.
+  midiaTipo       String?
+  // nome original do arquivo (usado como fileName em documentos).
+  midiaNome       String?
+  usarPreviewLink Boolean  @default(true)
+  // grupos destino: JSON com lista de ids de grupo. null/[] = todos os grupos da campanha.
+  gruposAlvo      String?
+  criadoEm        DateTime @default(now())
+
+  campaign       Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  scheduledSends ScheduledSend[]
+
+  @@index([campaignId])
+}
+
+// Ação/fila de disparo agendado. Uma "ação" lançada pelo dono (1 mensagem para várias contas)
+// gera VÁRIOS ScheduledSend (um por conta) que compartilham o mesmo `loteId` — a aba Ações
+// (M9.5) agrupa por `loteId` para mostrar um container por ação com o progresso de cada conta.
+model ScheduledSend {
+  id              String   @id @default(cuid())
+  campaignId      String
+  messageId       String
+  accountId       String
+  loteId          String? // agrupa os disparos de uma mesma ação (M9.5)
+  gruposAlvo      String // JSON com a lista de ids de grupo (SQLite não tem arrays)
+  agendadoPara    DateTime
+  perfilVelocidade String  @default("normal") // rapida | normal | lenta | custom
+  intervaloMin    Int      @default(140)
+  intervaloMax    Int      @default(460)
+  // Marcar todos os participantes (menção oculta): notifica cada membro mesmo com o grupo
+  // silenciado, sem poluir o texto com "@todos". Os jids vão só no mentionedJid da mensagem.
+  marcarTodos     Boolean  @default(false)
+  // status: queued | scheduled | processing | sent | failed
+  status          String   @default("queued")
+  resultado       String?
+  criadoEm        DateTime @default(now())
+  iniciadoEm      DateTime? // quando o worker começou a processar (timeline da ação)
+  finalizadoEm    DateTime? // quando terminou (para calcular a duração)
+  claimedByInstanceId String?
+  claimedByPid   Int?
+  claimedAt      DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  message  Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  targets  ScheduledSendTarget[]
+
+  @@index([campaignId])
+  @@index([status, agendadoPara])
+  @@index([campaignId, loteId])
+  @@index([status, accountId])
+  @@index([status, campaignId])
+}
+
+// Execução rastreável por grupo dentro de um disparo. Esta tabela é a fonte de verdade
+// para retomada segura: cada grupo tem status próprio e grupos finalizados não reenviam.
+model ScheduledSendTarget {
+  id              String    @id @default(cuid())
+  scheduledSendId String
+  groupId         String
+  accountId       String
+  waGroupId       String?
+  nomeGrupo       String
+  // status: pending | processing | sent | failed | skipped
+  status          String    @default("pending")
+  tentativa       Int       @default(0)
+  erro            String?
+  resultado       String?
+  criadoEm        DateTime  @default(now())
+  iniciadoEm      DateTime?
+  finalizadoEm    DateTime?
+  claimedByInstanceId String?
+  claimedByPid   Int?
+  claimedAt      DateTime?
+  atualizadoEm    DateTime  @updatedAt
+
+  scheduledSend ScheduledSend @relation(fields: [scheduledSendId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduledSendId, groupId])
+  @@index([scheduledSendId, status])
+  @@index([accountId, status])
+  @@index([status, claimedByInstanceId])
+  @@index([groupId])
+}
+
+// Fila de remoção de participantes duplicados (M6.6). Processada DEVAGAR pelo worker,
+// com espaçamento aleatório entre remoções por conta (anti-banimento). Um registro por
+// (grupo, número) a expulsar — sempre dos grupos "sair" (mantém-se o de menor #NN).
+model ParticipantRemoval {
+  id           String    @id @default(cuid())
+  campaignId   String
+  groupId      String
+  accountId    String // conta admin que executa a remoção
+  waGroupId    String // id do grupo no WhatsApp
+  numero       String
+  jid          String? // endereço completo do participante (PN ou LID) p/ a remoção
+  nomeGrupo    String // snapshot do nome (p/ exibir progresso sem novo join)
+  // status: queued | done | failed | canceled
+  status       String    @default("queued")
+  erro         String?
+  criadoEm     DateTime  @default(now())
+  processadoEm DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([accountId, status])
+}
+
+// Fila de alteração de grupos em lote (M6.3). Processada DEVAGAR pelo worker, com
+// espaçamento aleatório entre alterações por conta (anti-banimento) e contas em paralelo.
+// Um registro por grupo a alterar; `edits` é o JSON dos campos escolhidos (nome, descrição,
+// permissões, promover admins).
+model GroupEdit {
+  id           String    @id @default(cuid())
+  campaignId   String
+  groupId      String
+  accountId    String // conta admin que executa a alteração
+  waGroupId    String // id do grupo no WhatsApp
+  nomeGrupo    String // snapshot do nome (p/ exibir progresso)
+  edits        String // JSON dos campos a aplicar
+  // status: queued | done | failed | canceled
+  status       String    @default("queued")
+  erro         String?
+  criadoEm     DateTime  @default(now())
+  processadoEm DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([accountId, status])
+}
+
+// Solicitações de entrada em grupos (M9.1). Sincronizadas ao vivo do WhatsApp (grupos com
+// "exigir aprovação para entrar" ligado) e moderadas em lote. A aprovação/recusa é uma MUTAÇÃO
+// REAL (aprovar = +1 membro no grupo), então é processada pela FILA/WORKER com pacing
+// anti-banimento (espaçamento entre ações + pacotes), não em lote síncrono.
+model EntryRequest {
+  id         String   @id @default(cuid())
+  campaignId String
+  groupId    String
+  // conta admin que executa a aprovação/recusa (a dona do grupo). Opcional: se a conta for
+  // excluída, o histórico da solicitação permanece, só desvincula (SetNull).
+  accountId  String?
+  waGroupId  String? // id do grupo no WhatsApp (snapshot, p/ o worker agir sem novo fetch)
+  // chave de exibição: dígitos do telefone (PN) ou id do LID quando o grupo está em modo LID.
+  numero     String
+  jid        String? // endereço completo do solicitante (PN ou LID) p/ approve/reject no Baileys
+  nomeGrupo  String? // snapshot do nome do grupo (exibir sem novo join)
+  // ação enfileirada (quando status=queued): approve | reject
+  acao       String?
+  // identifica a rodada de moderação em lote (para a barra de progresso da operação atual)
+  loteId     String?
+  // status: pending | queued | approved | rejected | failed | canceled
+  status     String   @default("pending")
+  erro       String?
+  criadoEm   DateTime @default(now())
+  processadoEm DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  account  Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, status])
+  @@index([accountId, status])
+}
+
+// Eventos de entrada/saída de participantes nos grupos da campanha (M9.2 — aba Atividades).
+// Capturados AO VIVO do WhatsApp (group-participants.update) pela conta DONA de cada grupo
+// (só ela registra, para não duplicar quando várias contas veem o mesmo evento). NÃO é
+// retroativo: só registra a partir de quando o sistema está rodando e a conta conectada.
+model GroupActivity {
+  id         String   @id @default(cuid())
+  campaignId String
+  groupId    String
+  accountId  String? // conta que capturou o evento (dona do grupo)
+  // chave de exibição: dígitos do telefone (PN) ou id do LID quando o grupo está em modo LID.
+  numero     String
+  jid        String?
+  // tipo: join (entrou) | leave (saiu)
+  tipo       String
+  nomeGrupo  String? // snapshot do nome do grupo
+  criadoEm   DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  group    Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  account  Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, criadoEm])
+  @@index([campaignId, tipo])
+  @@index([groupId])
+}
+
+// Eventos de engajamento para o Leadscoring (M9.3). v1: REAÇÕES dos membros às mensagens
+// disparadas pela campanha (capturadas ao vivo via messages.reaction; só conta reações às
+// nossas próprias mensagens, ou seja, engajamento com o conteúdo). Cada evento vale `peso`
+// pontos; a pontuação de um número é a soma dos pesos dos seus eventos. NÃO é retroativo.
+// Estruturado como eventos (não um total agregado) para alimentar também o gráfico de volume.
+model LeadEvent {
+  id         String   @id @default(cuid())
+  campaignId String
+  groupId    String?
+  accountId  String? // conta que capturou o evento
+  // chave de exibição: dígitos do telefone (PN) ou id do LID quando o grupo está em modo LID.
+  numero     String
+  jid        String?
+  // tipo: react (v1). Futuro: receive | view | play | reply.
+  tipo       String   @default("react")
+  peso       Int      @default(50)
+  emoji      String?
+  nomeGrupo  String?
+  criadoEm   DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  group    Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  account  Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, criadoEm])
+  @@index([campaignId, numero])
+}
+
+// Leadscoring: pontuação por número.
+model Lead {
+  id       String   @id @default(cuid())
+  numero   String   @unique
+  pontos   Int      @default(0)
+  eventos  String? // JSON com o histórico de eventos
+  criadoEm DateTime @default(now())
+}
+
+// Tags auxiliares (opcionalmente vinculadas a uma campanha).
+model Tag {
+  id         String  @id @default(cuid())
+  nome       String
+  cor        String?
+  campaignId String?
+
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+}
+
+// Números bloqueados.
+model Blacklist {
+  id       String   @id @default(cuid())
+  numero   String   @unique
+  motivo   String?
+  criadoEm DateTime @default(now())
+}
+
+// Números administradores / protegidos (base do anti-spam): NUNCA são listados como
+// participantes duplicados nem removidos dos grupos. Globais (valem para todas as
+// campanhas). Os telefones das próprias contas conectadas também são tratados como
+// protegidos automaticamente (resolvido no código, sem precisar cadastrar).
+model AdminNumber {
+  id       String   @id @default(cuid())
+  numero   String   @unique // só dígitos (normalizado)
+  nome     String?
+  criadoEm DateTime @default(now())
+}
+
+// Trava global de liderança do processo. Em produção, só o líder pode restaurar
+// sessões Baileys e rodar o worker; os demais processos ficam apenas servindo a API.
+model ProcessLeadership {
+  scope      String   @id
+  instanceId String
+  pid        Int
+  commit     String?
+  acquiredAt DateTime
+  renewedAt  DateTime
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// Posse de sessão por conta WhatsApp. Mesmo com liderança global, uma conta só pode ser
+// reaberta ou ter status alterado pela instância que ainda possui a lease dela.
+model AccountSessionOwnership {
+  accountId        String   @id
+  ownerInstanceId  String
+  ownerPid         Int
+  ownerCommit      String?
+  acquiredAt       DateTime
+  renewedAt        DateTime
+  leaseExpiresAt   DateTime
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}

@@ -1,0 +1,35 @@
+{
+  "name": "sendmidia",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portfolio de interface e API para gestao de campanhas, com integracoes externas desativadas.",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c green,cyan \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:client": "npm --workspace client run dev",
+    "build": "npm --workspace client run build",
+    "start": "cross-env NODE_ENV=production npm --workspace server run start",
+    "db:generate": "prisma generate --schema server/prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema server/prisma/schema.prisma",
+    "db:deploy": "node scripts/demo-database.mjs",
+    "db:studio": "prisma studio --schema server/prisma/schema.prisma",
+    "db:seed": "node server/prisma/seed.js",
+    "postinstall": "prisma generate --schema server/prisma/schema.prisma",
+    "test": "node --test server/tests/*.test.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
+  }
+}
